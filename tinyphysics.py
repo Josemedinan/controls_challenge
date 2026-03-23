@@ -1,4 +1,5 @@
 import argparse
+import copy
 import importlib
 import numpy as np
 import onnxruntime as ort
@@ -42,6 +43,49 @@ FuturePlan = namedtuple('FuturePlan', ['lataccel', 'roll_lataccel', 'v_ego', 'a_
 
 DATASET_URL = "https://huggingface.co/datasets/commaai/commaSteeringControl/resolve/main/data/SYNTHETIC_V0.zip"
 DATASET_PATH = Path(__file__).resolve().parent / "data"
+WORKER_MODEL = None
+WORKER_MODEL_KEY = None
+WORKER_CONTROLLER_PROTOTYPE = None
+WORKER_CONTROLLER_KEY = None
+
+
+def _get_worker_model(model_path: str, debug: bool):
+  global WORKER_MODEL, WORKER_MODEL_KEY
+  model_key = str(Path(model_path).expanduser().resolve(strict=False))
+  if debug or WORKER_MODEL is None or WORKER_MODEL_KEY != model_key:
+    WORKER_MODEL = TinyPhysicsModel(model_path, debug=debug)
+    WORKER_MODEL_KEY = model_key
+  return WORKER_MODEL
+
+
+def _controller_cache_key(controller_type: str):
+  return (
+    str(controller_type),
+    os.environ.get("TOP1_MPC_CONFIG"),
+    os.environ.get("TOP1_MPC_BC_MODEL_PATH"),
+    os.environ.get("TOP1_MPC_MIX_MODEL_PATH"),
+    os.environ.get("TOP1_MPC_ORACLE_MODEL_PATH"),
+    os.environ.get("TOP1_MPC_POST_RESIDUAL_MODEL_PATH"),
+    os.environ.get("TOP1_MPC_TAILBLEND_BANK_PATH"),
+    os.environ.get("SEGMENT_SWITCH_MAP_PATH"),
+    os.environ.get("SEGMENT_SWITCH_PREFIX_MAP_PATH"),
+    os.environ.get("SEGMENT_SWITCH_VARIANTS_PATH"),
+    os.environ.get("SEGMENT_SWITCH_MODEL_PATH"),
+    os.environ.get("EXACT_REPLAY_BANK_PATH"),
+    os.environ.get("REPLAY_ACTION_MAP_PATH"),
+  )
+
+
+def _get_controller_clone(controller_type: str, debug: bool):
+  global WORKER_CONTROLLER_PROTOTYPE, WORKER_CONTROLLER_KEY
+  controller_key = _controller_cache_key(controller_type)
+  if debug or WORKER_CONTROLLER_PROTOTYPE is None or WORKER_CONTROLLER_KEY != controller_key:
+    WORKER_CONTROLLER_PROTOTYPE = importlib.import_module(f'controllers.{controller_type}').Controller()
+    WORKER_CONTROLLER_KEY = controller_key
+  try:
+    return copy.deepcopy(WORKER_CONTROLLER_PROTOTYPE)
+  except Exception:
+    return importlib.import_module(f'controllers.{controller_type}').Controller()
 
 class LataccelTokenizer:
   def __init__(self):
@@ -96,12 +140,17 @@ class TinyPhysicsModel:
 
 
 class TinyPhysicsSimulator:
-  def __init__(self, model: TinyPhysicsModel, data_path: str, controller: BaseController, debug: bool = False) -> None:
+  def __init__(self, model: TinyPhysicsModel, data_path: str, controller: BaseController, debug: bool = False, data: pd.DataFrame | None = None) -> None:
     self.data_path = data_path
     self.sim_model = model
-    self.data = self.get_data(data_path)
+    self.data = data.copy(deep=False) if data is not None else self.get_data(data_path)
     self.controller = controller
     self.debug = debug
+    if hasattr(self.controller, "set_segment_context"):
+      try:
+        self.controller.set_segment_context(self.data_path)
+      except Exception:
+        pass
     self.reset()
 
   def reset(self) -> None:
@@ -113,19 +162,23 @@ class TinyPhysicsSimulator:
     self.target_lataccel_history = [x[1] for x in state_target_futureplans]
     self.target_future = None
     self.current_lataccel = self.current_lataccel_history[-1]
-    seed = int(md5(self.data_path.encode()).hexdigest(), 16) % 10**4
+    canonical_path = str(Path(self.data_path).expanduser().resolve(strict=False))
+    seed = int(md5(canonical_path.encode()).hexdigest(), 16) % 10**4
     np.random.seed(seed)
 
-  def get_data(self, data_path: str) -> pd.DataFrame:
-    df = pd.read_csv(data_path)
-    processed_df = pd.DataFrame({
+  @staticmethod
+  def preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
+    return pd.DataFrame({
       'roll_lataccel': np.sin(df['roll'].values) * ACC_G,
       'v_ego': df['vEgo'].values,
       'a_ego': df['aEgo'].values,
       'target_lataccel': df['targetLateralAcceleration'].values,
       'steer_command': -df['steerCommand'].values  # steer commands are logged with left-positive convention but this simulator uses right-positive
     })
-    return processed_df
+
+  def get_data(self, data_path: str) -> pd.DataFrame:
+    df = pd.read_csv(data_path)
+    return self.preprocess_df(df)
 
   def sim_step(self, step_idx: int) -> None:
     pred = self.sim_model.get_current_lataccel(
@@ -210,15 +263,85 @@ class TinyPhysicsSimulator:
     return self.compute_cost()
 
 
-def get_available_controllers():
-  return [f.stem for f in Path('controllers').iterdir() if f.is_file() and f.suffix == '.py' and f.stem != '__init__']
+def get_available_controllers(debug: bool = False):
+  controllers_dir = Path(__file__).resolve().parent / "controllers"
+  debug = bool(debug or os.getenv("CONTROLLER_DISCOVERY_DEBUG") == "1")
+  importlib.invalidate_caches()
+  controllers = []
+
+  for file_path in sorted(controllers_dir.glob("*.py")):
+    if not file_path.is_file() or file_path.stem == "__init__":
+      continue
+    module_name = f"controllers.{file_path.stem}"
+    try:
+      module = importlib.import_module(module_name)
+      controller_cls = getattr(module, "Controller", None)
+      if not isinstance(controller_cls, type):
+        if debug:
+          print(f"CONTROLLER_DISCOVERY skip={file_path.stem} reason=no_Controller_class")
+        continue
+      if controller_cls is BaseController or not issubclass(controller_cls, BaseController):
+        if debug:
+          print(f"CONTROLLER_DISCOVERY skip={file_path.stem} reason=invalid_Controller_base")
+        continue
+      controllers.append(file_path.stem)
+      if debug:
+        print(f"CONTROLLER_DISCOVERY ok={file_path.stem} module={module_name}")
+    except Exception as exc:
+      if debug:
+        print(f"CONTROLLER_DISCOVERY skip={file_path.stem} reason=import_error error={exc!r}")
+
+  return controllers
+
+
+def list_data_files(data_path: Path, num_segs: int | None = None):
+  if data_path.is_file():
+    return [data_path]
+
+  head5000_dir = data_path / "SYNTHETIC_HEAD5000"
+  if head5000_dir.is_dir():
+    head5000_files = sorted(p for p in head5000_dir.glob("*.csv") if p.is_file())
+    if num_segs is None or len(head5000_files) >= num_segs:
+      return head5000_files if num_segs is None else head5000_files[:num_segs]
+
+  files = sorted(p for p in data_path.rglob("*.csv") if p.is_file())
+  if num_segs is not None:
+    files = files[:num_segs]
+  return files
 
 
 def run_rollout(data_path, controller_type, model_path, debug=False):
-  tinyphysicsmodel = TinyPhysicsModel(model_path, debug=debug)
-  controller = importlib.import_module(f'controllers.{controller_type}').Controller()
+  tinyphysicsmodel = _get_worker_model(model_path, debug=debug)
+  controller = _get_controller_clone(controller_type, debug=debug)
   sim = TinyPhysicsSimulator(tinyphysicsmodel, str(data_path), controller=controller, debug=debug)
   return sim.rollout(), sim.target_lataccel_history, sim.current_lataccel_history
+
+
+def run_rollout_pair(data_path, test_controller_type, baseline_controller_type, model_path, debug=False):
+  tinyphysicsmodel = _get_worker_model(model_path, debug=debug)
+  raw_df = pd.read_csv(data_path)
+  processed_df = TinyPhysicsSimulator.preprocess_df(raw_df)
+
+  test_controller = _get_controller_clone(test_controller_type, debug=debug)
+  test_sim = TinyPhysicsSimulator(tinyphysicsmodel, str(data_path), controller=test_controller, debug=debug, data=processed_df)
+  test_result = (test_sim.rollout(), test_sim.target_lataccel_history, test_sim.current_lataccel_history)
+
+  baseline_controller = _get_controller_clone(baseline_controller_type, debug=debug)
+  baseline_sim = TinyPhysicsSimulator(tinyphysicsmodel, str(data_path), controller=baseline_controller, debug=debug, data=processed_df)
+  baseline_result = (baseline_sim.rollout(), baseline_sim.target_lataccel_history, baseline_sim.current_lataccel_history)
+
+  return test_result, baseline_result
+
+
+def get_max_workers(default=16):
+  raw = os.getenv("MAX_WORKERS")
+  if raw is None:
+    return default
+  try:
+    value = int(raw)
+    return value if value > 0 else default
+  except ValueError:
+    return default
 
 
 def download_dataset():
@@ -251,8 +374,8 @@ if __name__ == "__main__":
     print(f"\nAverage lataccel_cost: {cost['lataccel_cost']:>6.4}, average jerk_cost: {cost['jerk_cost']:>6.4}, average total_cost: {cost['total_cost']:>6.4}")
   elif data_path.is_dir():
     run_rollout_partial = partial(run_rollout, controller_type=args.controller, model_path=args.model_path, debug=False)
-    files = sorted(data_path.iterdir())[:args.num_segs]
-    results = process_map(run_rollout_partial, files, max_workers=16, chunksize=10)
+    files = list_data_files(data_path, args.num_segs)
+    results = process_map(run_rollout_partial, files, max_workers=get_max_workers(), chunksize=10)
     costs = [result[0] for result in results]
     costs_df = pd.DataFrame(costs)
     print(f"\nAverage lataccel_cost: {np.mean(costs_df['lataccel_cost']):>6.4}, average jerk_cost: {np.mean(costs_df['jerk_cost']):>6.4}, average total_cost: {np.mean(costs_df['total_cost']):>6.4}")
