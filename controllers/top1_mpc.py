@@ -1846,7 +1846,7 @@ class Controller(BaseController):
 
       Hs = float(R + (B.T @ Pn @ B)[0, 0])
       G = (B.T @ Pn @ A).reshape(2)
-      g = float(B.T @ (Pn @ c + pn))
+      g = float(np.asarray(B.T @ (Pn @ c + pn)).reshape(-1)[0])
 
       K[k] = G / Hs
       kff[k] = g / Hs
