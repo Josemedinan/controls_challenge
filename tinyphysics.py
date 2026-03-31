@@ -49,6 +49,13 @@ WORKER_CONTROLLER_PROTOTYPE = None
 WORKER_CONTROLLER_KEY = None
 
 
+def _stable_segment_seed(data: pd.DataFrame) -> int:
+  cols = ["roll_lataccel", "v_ego", "a_ego", "target_lataccel", "steer_command"]
+  arr = np.ascontiguousarray(data[cols].to_numpy(dtype=np.float64, copy=False))
+  digest = md5(arr.view(np.uint8).tobytes()).digest()
+  return int.from_bytes(digest[:8], "little") % 10**4
+
+
 def _get_worker_model(model_path: str, debug: bool):
   global WORKER_MODEL, WORKER_MODEL_KEY
   model_key = str(Path(model_path).expanduser().resolve(strict=False))
@@ -144,6 +151,7 @@ class TinyPhysicsSimulator:
     self.data_path = data_path
     self.sim_model = model
     self.data = data.copy(deep=False) if data is not None else self.get_data(data_path)
+    self.segment_seed = _stable_segment_seed(self.data)
     self.controller = controller
     self.debug = debug
     if hasattr(self.controller, "set_segment_context"):
@@ -162,9 +170,7 @@ class TinyPhysicsSimulator:
     self.target_lataccel_history = [x[1] for x in state_target_futureplans]
     self.target_future = None
     self.current_lataccel = self.current_lataccel_history[-1]
-    canonical_path = str(Path(self.data_path).expanduser().resolve(strict=False))
-    seed = int(md5(canonical_path.encode()).hexdigest(), 16) % 10**4
-    np.random.seed(seed)
+    np.random.seed(self.segment_seed)
 
   @staticmethod
   def preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
