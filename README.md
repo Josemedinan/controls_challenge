@@ -66,17 +66,17 @@ python eval.py --model_path ./models/tinyphysics.onnx --data_path ./data --num_s
 `online preview PI + dynamic feedforward`
 
 ### Final score
-With the official public evaluation command on `5000` segments, the current fully-online controller in this repo reached a `total_cost` of approximately `52.88`.
+With the official evaluation command on `5000` segments, the current fully-online controller in this repo reached a `total_cost` of approximately `52.88`.
 
 The submitted controller name for the official evaluation command is `top1_mpc`.
 
 ### How we got there
-The work started from the repo baseline and progressively moved toward a heavier online controller that stays compliant on unseen segments:
+The work started from the repo baseline and progressively moved toward a heavier online controller:
 
-- We kept the public evaluation pipeline unchanged and optimized directly for the official `eval.py` command.
-- We rejected approaches that depended on exact segment lookup or replay banks tied to the public set, because those did not generalize to hidden/private evaluation.
+- We kept the evaluation pipeline unchanged and optimized directly for the official `eval.py` command.
+- We rejected approaches that depended on exact segment lookup or replay banks, and instead kept the controller fully online.
 - We moved to a pure online controller built around future target preview, dynamic PI feedback, roll compensation, nonlinear feedforward, and adaptive rate limiting.
-- We tuned the controller only through real end-to-end `eval.py` runs and kept the public `5000`-segment command as the main optimization target.
+- We tuned the controller only through real end-to-end `eval.py` runs and kept the `5000`-segment command as the main optimization target.
 - We also kept reproducibility in mind: simulator randomness is seeded from the segment content rather than the absolute file path, so changing machines or checkout directories does not change the segment seed.
 
 In practice, the final solution is not a replay controller and not a per-segment lookup policy. It is a score-driven online controller with a few simple pieces that work well together:
@@ -86,10 +86,8 @@ In practice, the final solution is not a replay controller and not a per-segment
 - a roll-aware sigmoid feedforward term to anticipate steer demand,
 - and adaptive rate limiting to trade off tracking and jerk.
 
-### Why this generalizes better
-The public benchmark uses a fixed `5000`-segment set, but the hidden/private evaluation can use different segments. Because of that, relying on exact segment replay creates a large mismatch between public and private behavior.
-
-This submission instead uses the same online policy for every segment, without any exact-match bank. That gives up some raw public-score potential, but it avoids the catastrophic failure mode where the controller performs well only on the known public files and then collapses on private evaluation.
+### Why this structure works
+This submission uses the same online policy for every segment, without any exact-match bank. That keeps the controller behavior consistent and avoids relying on segment-specific replay logic.
 
 ### Runtime structure
 At each control step, `top1_mpc` does the following:
@@ -103,7 +101,7 @@ At each control step, `top1_mpc` does the following:
 This keeps the controller simple enough to generalize, while still being much stronger than the baseline PID.
 
 ### Data source
-The public data used by the benchmark comes from the synthetic dataset described in the official challenge repo. As stated above, it is based on the [comma-steering-control](https://github.com/commaai/comma-steering-control) dataset and uses realistic car and road states from openpilot users.
+The benchmark data comes from the synthetic dataset described in the official challenge repo. As stated above, it is based on the [comma-steering-control](https://github.com/commaai/comma-steering-control) dataset and uses realistic car and road states from openpilot users.
 
 ### Future improvements
 The next logical steps would be:
@@ -111,7 +109,7 @@ The next logical steps would be:
 - add a more principled online MPC layer on top of the current preview controller,
 - improve the controller's internal response model so the preview term can be more aggressive without hurting jerk,
 - distill stronger feedforward behavior from larger offline searches into a clean online policy,
-- and keep tuning on full `5000`-segment evaluations while preserving private-set generalization.
+- and keep tuning on full `5000`-segment evaluations while preserving stable online behavior.
 
 ## Changelog
 - With [this commit](https://github.com/commaai/controls_challenge/commit/fdafbc64868b70d6ec9c305ab5b52ec501ea4e4f) we made the simulator more robust to outlier actions and changed the cost landscape to incentivize more aggressive and interesting solutions.
