@@ -4695,7 +4695,7 @@ def _apply_tailblend_env_from_top1_config():
 _tailblend_mod._make_fallback_controller = lambda: _OriginalTop1MPCController()
 
 
-class Controller(_tailblend_mod.Controller):
+class TailblendController(_tailblend_mod.Controller):
   DEFAULT_CONFIG = {
     "enable_online_library": 1,
     "enable_segment_model": 0,
@@ -4708,3 +4708,8 @@ class Controller(_tailblend_mod.Controller):
   def __init__(self):
     _apply_tailblend_env_from_top1_config()
     super().__init__()
+
+
+# Official exported top1_mpc controller: keep this as the genuine online controller.
+# Tailblend remains available as an experimental side path via top1_mpc_tailblend.py.
+Controller = _OriginalTop1MPCController
