@@ -37,22 +37,26 @@ class Controller(BaseController):
   DEFAULT_CONFIG = {
     "p": 0.235,
     "i": 0.115,
-    "d": 0.0,
+    "d": 0.03,
     "preview_steps": 10,
     "preview_decay": 0.41,
     "preview_weight": 0.72,
     "preview_extra_weight": 0.08,
+    "short_preview_mix": 0.32,
     "preview_severity_scale": 1.50,
     "target_ff": 0.10,
     "roll_ff": 0.34,
     "integral_decay": 1.0,
     "integral_clip": 30.0,
+    "i_min": 0.07,
+    "i_lat_scale": 0.32,
     "rate_base": 0.25,
     "rate_severity": 0.08,
     "rate_error": 0.14,
     "mag_pid_factor": 0.23,
     "aego_p_scale": 0.10,
     "min_p_scale": 0.10,
+    "d_aego_scale": 0.10,
     "steer_factor": 13.0,
     "steer_sat_v": 20.0,
     "steer_command_sat": 2.0,
@@ -78,17 +82,21 @@ class Controller(BaseController):
     self.preview_decay = float(max(1e-4, cfg["preview_decay"]))
     self.preview_weight = float(np.clip(cfg["preview_weight"], 0.0, 1.0))
     self.preview_extra_weight = float(np.clip(cfg["preview_extra_weight"], 0.0, 0.4))
+    self.short_preview_mix = float(np.clip(cfg["short_preview_mix"], 0.0, 1.0))
     self.preview_severity_scale = float(max(1e-4, cfg["preview_severity_scale"]))
     self.target_ff = float(cfg["target_ff"])
     self.roll_ff = float(cfg["roll_ff"])
     self.integral_decay = float(np.clip(cfg["integral_decay"], 0.0, 1.0))
     self.integral_clip = float(abs(cfg["integral_clip"]))
+    self.i_min = float(max(0.0, cfg["i_min"]))
+    self.i_lat_scale = float(max(0.0, cfg["i_lat_scale"]))
     self.rate_base = float(abs(cfg["rate_base"]))
     self.rate_severity = float(abs(cfg["rate_severity"]))
     self.rate_error = float(abs(cfg["rate_error"]))
     self.mag_pid_factor = float(cfg["mag_pid_factor"])
     self.aego_p_scale = float(cfg["aego_p_scale"])
     self.min_p_scale = float(cfg["min_p_scale"])
+    self.d_aego_scale = float(max(0.0, cfg["d_aego_scale"]))
     self.steer_factor = float(cfg["steer_factor"])
     self.steer_sat_v = float(cfg["steer_sat_v"])
     self.steer_command_sat = float(cfg["steer_command_sat"])
@@ -108,6 +116,11 @@ class Controller(BaseController):
       self.preview_decay,
       target_lataccel,
     )
+    if future_targets:
+      short_seq = np.asarray([target_lataccel] + future_targets[:5], dtype=np.float64)
+      short_weights = np.asarray([4, 3, 2, 2, 2, 1][:short_seq.size], dtype=np.float64)
+      short_target = float(np.average(short_seq, weights=short_weights))
+      preview_target = float((1.0 - self.short_preview_mix) * preview_target + self.short_preview_mix * short_target)
     future_delta = preview_target - float(target_lataccel)
     severity = min(1.0, abs(future_delta) / self.preview_severity_scale)
     preview_weight = min(0.95, self.preview_weight + self.preview_extra_weight * severity)
@@ -144,7 +157,9 @@ class Controller(BaseController):
 
     pid_factor = max(0.5, 1.0 - self.mag_pid_factor * abs(reference))
     p_dynamic = max(self.min_p_scale, self.p - self.aego_p_scale * abs(float(state.a_ego)))
-    feedback = (p_dynamic * error + self.i * self.error_integral + self.d * error_diff) * pid_factor
+    i_dynamic = max(self.i_min, self.i / (1.0 + self.i_lat_scale * abs(reference)))
+    d_dynamic = -self.d * (1.0 + self.d_aego_scale * abs(float(state.a_ego)))
+    feedback = (p_dynamic * error + i_dynamic * self.error_integral + d_dynamic * error_diff) * pid_factor
     ff_target = self.target_ff * future_delta
     ff_roll = self.roll_ff * roll_preview
     steer_accel_target = float(reference - float(state.roll_lataccel))

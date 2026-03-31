@@ -66,7 +66,7 @@ python eval.py --model_path ./models/tinyphysics.onnx --data_path ./data --num_s
 `online preview PI + dynamic feedforward`
 
 ### Final score
-With the official public evaluation command on `5000` segments, the current fully-online controller in this repo reached a `total_cost` of approximately `55.48`.
+With the official public evaluation command on `5000` segments, the current fully-online controller in this repo reached a `total_cost` of approximately `52.88`.
 
 The submitted controller name for the official evaluation command is `top1_mpc`.
 
