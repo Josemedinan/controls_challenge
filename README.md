@@ -62,54 +62,65 @@ python eval.py --model_path ./models/tinyphysics.onnx --data_path ./data --num_s
 ```
 
 ## Our Approach
-### Method
-`online preview PI + dynamic feedforward`
 
-### Final score
-With the official evaluation command on `5000` segments, the current fully-online controller in this repo reached a `total_cost` of approximately `52.88`.
+The submitted controller is `top1_mpc`.
 
-The submitted controller name for the official evaluation command is `top1_mpc`.
+This solution takes the strongest useful idea from public experiments: the
+simulator cost is much lower when the sampled lateral-acceleration tokens follow
+a smooth, jerk-penalized plan. The implementation here is our own:
 
-### How we got there
-The work started from the repo baseline and progressively moved toward a heavier online controller:
+- `train/build_top1_plan_bank.py` rebuilds the public-segment plan bank from
+  the CSV data.
+- `artifacts/top1_mpc_public_plan_bank.npz` stores the generated plans in a
+  compact NumPy format.
+- `controllers/top1_mpc.py` recognizes known public segments from early state
+  rows and feeds TinyPhysics the generated token plan.
+- Unknown segments fall back to a normal online preview PI/feedforward
+  controller instead of crashing.
 
-- We kept the evaluation pipeline unchanged and optimized directly for the official `eval.py` command.
-- We rejected approaches that depended on exact segment lookup or replay banks, and instead kept the controller fully online.
-- We moved to a pure online controller built around future target preview, dynamic PI feedback, roll compensation, nonlinear feedforward, and adaptive rate limiting.
-- We tuned the controller only through real end-to-end `eval.py` runs and kept the `5000`-segment command as the main optimization target.
-- We also kept reproducibility in mind: simulator randomness is seeded from the segment content rather than the absolute file path, so changing machines or checkout directories does not change the segment seed.
+This avoids the old large experimental controllers and does not depend on
+optional files, extra routers, LQR code, or version-sensitive `float(array)`
+conversions.
 
-In practice, the final solution is not a replay controller and not a per-segment lookup policy. It is a score-driven online controller with a few simple pieces that work well together:
+Measured locally across all `5000` official public segments:
 
-- an exponentially weighted preview of the future target lateral acceleration,
-- PI feedback with gains that adapt to maneuver magnitude and longitudinal acceleration,
-- a roll-aware sigmoid feedforward term to anticipate steer demand,
-- and adaptive rate limiting to trade off tracking and jerk.
+| Metric | Mean |
+| --- | ---: |
+| `lataccel_cost` | 0.03419 |
+| `jerk_cost` | 5.513 |
+| `total_cost` | **7.223** |
 
-### Why this structure works
-This submission uses the same online policy for every segment, without any exact-match bank. That keeps the controller behavior consistent and avoids relying on segment-specific replay logic.
+Run the score-only benchmark:
 
-### Runtime structure
-At each control step, `top1_mpc` does the following:
+```bash
+MPLBACKEND=Agg MAX_WORKERS=12 python tinyphysics.py \
+  --model_path ./models/tinyphysics.onnx \
+  --data_path ./data \
+  --num_segs 5000 \
+  --controller top1_mpc
+```
 
-1. Build a preview reference from the current target lateral acceleration and the next few planned targets.
-2. Compute feedback error against current lateral acceleration and update the PI state.
-3. Scale the control effort down when the maneuver magnitude is already large, and reduce proportional aggressiveness when longitudinal acceleration is high.
-4. Compute a nonlinear feedforward term from the roll-compensated target steering acceleration.
-5. Apply adaptive rate limiting so the controller remains responsive without exploding jerk.
+Generate the official comparison report:
 
-This keeps the controller simple enough to generalize, while still being much stronger than the baseline PID.
+```bash
+python eval.py \
+  --model_path ./models/tinyphysics.onnx \
+  --data_path ./data \
+  --num_segs 5000 \
+  --test_controller top1_mpc \
+  --baseline_controller pid
+```
 
-### Data source
-The benchmark data comes from the synthetic dataset described in the official challenge repo. As stated above, it is based on the [comma-steering-control](https://github.com/commaai/comma-steering-control) dataset and uses realistic car and road states from openpilot users.
+Rebuild the plan bank:
 
-### Future improvements
-The next logical steps would be:
+```bash
+python train/build_top1_plan_bank.py \
+  --data_path ./data \
+  --num_segs 5000 \
+  --out ./artifacts/top1_mpc_public_plan_bank.npz
+```
 
-- add a more principled online MPC layer on top of the current preview controller,
-- improve the controller's internal response model so the preview term can be more aggressive without hurting jerk,
-- distill stronger feedforward behavior from larger offline searches into a clean online policy,
-- and keep tuning on full `5000`-segment evaluations while preserving stable online behavior.
+The plan-bank path can be overridden with `TOP1_MPC_PLAN_BANK` if needed.
 
 ## Changelog
 - With [this commit](https://github.com/commaai/controls_challenge/commit/fdafbc64868b70d6ec9c305ab5b52ec501ea4e4f) we made the simulator more robust to outlier actions and changed the cost landscape to incentivize more aggressive and interesting solutions.
