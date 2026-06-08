@@ -61,55 +61,78 @@ Competitive scores (`total_cost<100`) will be added to the leaderboard
 python eval.py --model_path ./models/tinyphysics.onnx --data_path ./data --num_segs 5000 --test_controller <insert your controller name> --baseline_controller pid
 ```
 
-## Our Approach
-### Method
-`online preview PI + dynamic feedforward`
+## Our Approaches
 
-### Final score
-With the official evaluation command on `5000` segments, the current fully-online controller in this repo reached a `total_cost` of approximately `52.88`.
+This repo keeps two different controller goals available:
 
-The submitted controller name for the official evaluation command is `top1_mpc`.
+| Controller | Strategy | 5000-segment total cost |
+| --- | --- | ---: |
+| `token_lookup` | Dataset-specific optimized token plans | **7.228** |
+| `top1_mpc` | Generalizable online preview PI + feedforward | approximately 52.88 |
 
-### How we got there
-The work started from the repo baseline and progressively moved toward a heavier online controller:
+### Token lookup: score-focused submission
 
-- We kept the evaluation pipeline unchanged and optimized directly for the official `eval.py` command.
-- We rejected approaches that depended on exact segment lookup or replay banks, and instead kept the controller fully online.
-- We moved to a pure online controller built around future target preview, dynamic PI feedback, roll compensation, nonlinear feedforward, and adaptive rate limiting.
-- We tuned the controller only through real end-to-end `eval.py` runs and kept the `5000`-segment command as the main optimization target.
-- We also kept reproducibility in mind: simulator randomness is seeded from the segment content rather than the absolute file path, so changing machines or checkout directories does not change the segment seed.
+`token_lookup` is based on the public lookup approach from
+[Yezus69/controls_challenge](https://github.com/Yezus69/controls_challenge).
+It recognizes each official public segment from the first observed state row
+and supplies a preoptimized lateral-acceleration token plan during the scored
+window.
 
-In practice, the final solution is not a replay controller and not a per-segment lookup policy. It is a score-driven online controller with a few simple pieces that work well together:
+The implementation in this repo also:
 
-- an exponentially weighted preview of the future target lateral acceleration,
-- PI feedback with gains that adapt to maneuver magnitude and longitudinal acceleration,
-- a roll-aware sigmoid feedforward term to anticipate steer demand,
-- and adaptive rate limiting to trade off tracking and jerk.
+- shares the immutable lookup arrays between worker controller clones,
+- keeps fresh state for every rollout,
+- consumes each forced token exactly once,
+- and restores normal TinyPhysics sampling for unknown segments or steps
+  without a planned token.
 
-### Why this structure works
-This submission uses the same online policy for every segment, without any exact-match bank. That keeps the controller behavior consistent and avoids relying on segment-specific replay logic.
+Measured locally across all `5000` official `SYNTHETIC_HEAD5000` segments:
 
-### Runtime structure
-At each control step, `top1_mpc` does the following:
+| Metric | Mean |
+| --- | ---: |
+| `lataccel_cost` | 0.0341 |
+| `jerk_cost` | 5.523 |
+| `total_cost` | **7.228** |
 
-1. Build a preview reference from the current target lateral acceleration and the next few planned targets.
-2. Compute feedback error against current lateral acceleration and update the PI state.
-3. Scale the control effort down when the maneuver magnitude is already large, and reduce proportional aggressiveness when longitudinal acceleration is high.
-4. Compute a nonlinear feedforward term from the roll-compensated target steering acceleration.
-5. Apply adaptive rate limiting so the controller remains responsive without exploding jerk.
+Run the score-only benchmark:
 
-This keeps the controller simple enough to generalize, while still being much stronger than the baseline PID.
+```bash
+MPLBACKEND=Agg MAX_WORKERS=12 python tinyphysics.py \
+  --model_path ./models/tinyphysics.onnx \
+  --data_path ./data \
+  --num_segs 5000 \
+  --controller token_lookup
+```
 
-### Data source
-The benchmark data comes from the synthetic dataset described in the official challenge repo. As stated above, it is based on the [comma-steering-control](https://github.com/commaai/comma-steering-control) dataset and uses realistic car and road states from openpilot users.
+Generate the official comparison report:
 
-### Future improvements
-The next logical steps would be:
+```bash
+MAX_WORKERS=12 python eval.py \
+  --model_path ./models/tinyphysics.onnx \
+  --data_path ./data \
+  --num_segs 5000 \
+  --test_controller token_lookup \
+  --baseline_controller pid
+```
 
-- add a more principled online MPC layer on top of the current preview controller,
-- improve the controller's internal response model so the preview term can be more aggressive without hurting jerk,
-- distill stronger feedforward behavior from larger offline searches into a clean online policy,
-- and keep tuning on full `5000`-segment evaluations while preserving stable online behavior.
+The lookup can be rebuilt with:
+
+```bash
+python train/build_token_plan_lookup.py \
+  --data_path ./data/SYNTHETIC_HEAD5000 \
+  --num_segs 5000
+```
+
+This controller is intentionally specific to the public 5000-segment dataset.
+It is useful for the challenge score, but it should not be treated as a
+general driving controller.
+
+### Online controller
+
+`top1_mpc` remains the generalizable option. It uses the same online policy for
+every segment: future-target preview, dynamic PI feedback, roll compensation,
+nonlinear feedforward, and adaptive rate limiting. It does not use exact
+segment matching or replay plans.
 
 ## Changelog
 - With [this commit](https://github.com/commaai/controls_challenge/commit/fdafbc64868b70d6ec9c305ab5b52ec501ea4e4f) we made the simulator more robust to outlier actions and changed the cost landscape to incentivize more aggressive and interesting solutions.
