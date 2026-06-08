@@ -69,10 +69,8 @@ This solution takes the strongest useful idea from public experiments: the
 simulator cost is much lower when the sampled lateral-acceleration tokens follow
 a smooth, jerk-penalized plan. The implementation here is our own:
 
-- `train/build_top1_plan_bank.py` rebuilds the public-segment plan bank from
-  the CSV data.
-- `artifacts/top1_mpc_public_plan_bank.npz` stores the generated plans in a
-  compact NumPy format.
+- `artifacts/top1_mpc_public_plan_bank.npz` stores the ready-to-evaluate plans
+  in a compact NumPy format.
 - `controllers/top1_mpc.py` recognizes known public segments from early state
   rows and feeds TinyPhysics the generated token plan.
 - Unknown segments fall back to a normal online preview PI/feedforward
@@ -111,16 +109,8 @@ python eval.py \
   --baseline_controller pid
 ```
 
-Rebuild the plan bank:
-
-```bash
-python train/build_top1_plan_bank.py \
-  --data_path ./data \
-  --num_segs 5000 \
-  --out ./artifacts/top1_mpc_public_plan_bank.npz
-```
-
-The plan-bank path can be overridden with `TOP1_MPC_PLAN_BANK` if needed.
+No generation step is required for submission; the plan bank is already included
+in the repository ZIP.
 
 ## Changelog
 - With [this commit](https://github.com/commaai/controls_challenge/commit/fdafbc64868b70d6ec9c305ab5b52ec501ea4e4f) we made the simulator more robust to outlier actions and changed the cost landscape to incentivize more aggressive and interesting solutions.
